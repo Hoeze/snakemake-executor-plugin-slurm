@@ -52,6 +52,7 @@ from .utils import (
 )
 from .job_status_query import (
     get_min_job_age,
+    get_status_check_intervals,
     is_query_tool_available,
     should_recommend_squeue_status_command,
     query_job_status_squeue,
@@ -90,10 +91,11 @@ def _get_status_command_default():
             "system. At least one of these commands is required for job "
             "status queries."
         )
+    if squeue_available and sacct_available:
+        return "squeue+sacct"
     if sacct_available:
         return "sacct"
-    else:
-        return "squeue"
+    return "squeue"
 
 
 def _get_status_command_help():
@@ -109,39 +111,27 @@ def _get_status_command_help():
             "SLURM not detected on this system, so no status command can be used."
         )
 
-    sacct_available = is_query_tool_available("sacct")
-    squeue_recommended = should_recommend_squeue_status_command()
-
     base_help = (
         "Command to query job status. Options: 'sacct', 'squeue', "
         "'squeue+sacct'. 'squeue+sacct' queries squeue first and uses sacct "
         "only for active jobs that squeue does not report. "
     )
 
-    if default_cmd == "sacct":
-        if sacct_available and not squeue_recommended:
+    if default_cmd == "squeue+sacct":
+        info = "'squeue' and 'sacct' detected"
+    elif default_cmd == "sacct":
+        info = "'squeue' not available, falling back to 'sacct'"
+    else:  # default_cmd == "squeue"
+        if should_recommend_squeue_status_command():
             info = (
-                "'sacct' detected and will be used "
-                "(MinJobAge may be too low for reliable 'squeue' usage)"
+                "'sacct' not available, falling back to 'squeue'. "
+                "MinJobAge is sufficient for reliable 'squeue' usage"
             )
         else:
-            info = "'sacct' detected and will be used"
-    else:  # default_cmd == "squeue"
-        if squeue_recommended:
-            # cumbersome, due to black and the need to stay below 80 chars
-            msg_part1 = "'squeue' recommended (MinJobAge is sufficient )"
-            msg_part2 = " for reliable usage"
-            info = msg_part1 + msg_part2
-        elif not sacct_available:
             info = (
                 "'sacct' not available, falling back to 'squeue'. "
                 "WARNING: 'squeue' may not work reliably if MinJobAge is "
                 "too low"
-            )
-        else:
-            info = (
-                "'squeue' will be used. "
-                "WARNING: MinJobAge may be too low for reliable 'squeue' usage"
             )
 
     return (
@@ -253,11 +243,12 @@ class ExecutorSettings(ExecutorSettingsBase):
     )
 
     init_seconds_before_status_checks: Optional[int] = field(
-        default=40,
+        default=None,
         metadata={
             "help": "Defines the time in seconds before the first status "
             "check is performed on submitted jobs. Must be a positive "
-            "integer",
+            "integer. If not set, it is 20 seconds with the status command "
+            "'squeue+sacct' and 40 seconds otherwise.",
         },
     )
 
@@ -269,7 +260,8 @@ class ExecutorSettings(ExecutorSettingsBase):
             "grows by 10 seconds per check up to this value. Must not be "
             "smaller than the initial time before status checks. If both are "
             "equal, the status is checked at a fixed interval. "
-            "If not set, the maximum is 180 seconds.",
+            "If not set, the maximum is 20 seconds with the status command "
+            "'squeue+sacct' and 180 seconds otherwise.",
         },
     )
 
@@ -1300,30 +1292,14 @@ class Executor(RemoteExecutor):
             "TIMEOUT",
             "ERROR",
         )
-        # Cap sleeping time between querying the status of all active jobs:
-        # If `AccountingStorageType`` for `sacct` is set to
-        # `accounting_storage/none`, `sacct` will query `slurmctld` (instead
-        # of `slurmdbd`) and this in turn can rely on default config,
-        # see: https://stackoverflow.com/a/46667605
-        # This config defaults to `MinJobAge=300`, which implies that jobs will
-        # be removed from `slurmctld` within 6 minutes of finishing. So the
-        # default is conservative, with half that time.
-        max_sleep_time = (
-            getattr(
-                self.workflow.executor_settings,
-                "max_seconds_between_status_checks",
-                None,
-            )
-            or 180
+        # Cap sleeping time between querying the status of all active jobs
+        status_command_name = self.get_status_command()
+        initial_interval, max_sleep_time = get_status_check_intervals(
+            self.workflow.executor_settings, status_command_name
         )
 
         sacct_query_durations = []
 
-        initial_interval = getattr(
-            self.workflow.executor_settings,
-            "init_seconds_before_status_checks",
-            40,
-        )
         # Fast path: if there are no active jobs, skip querying
         if not active_jobs:
             self.next_seconds_between_status_checks = initial_interval
@@ -1341,7 +1317,6 @@ class Executor(RemoteExecutor):
         missing_sacct_status = set()
 
         # decide which status command to use
-        status_command_name = self.get_status_command()
         min_job_age = get_min_job_age()
         dynamic_check_threshold = 3 * initial_interval
         if status_command_name == "squeue":

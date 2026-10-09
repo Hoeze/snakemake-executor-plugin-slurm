@@ -5,7 +5,11 @@ SLURM parameter validation functions for the Snakemake executor plugin.
 import re
 from pathlib import Path
 from snakemake_interface_common.exceptions import WorkflowError
-from .job_status_query import get_min_job_age, is_query_tool_available
+from .job_status_query import (
+    get_min_job_age,
+    get_status_check_intervals,
+    is_query_tool_available,
+)
 
 
 def validate_or_get_slurm_job_id(job_id, output):
@@ -144,11 +148,7 @@ def validate_status_command_settings(settings, logger):
         return
     min_job_age = get_min_job_age()
     sacct_available = is_query_tool_available("sacct")
-    initial_interval = getattr(
-        settings,
-        "init_seconds_before_status_checks",
-        40,
-    )
+    initial_interval, _ = get_status_check_intervals(settings, status_command)
     dynamic_check_threshold = 3 * initial_interval
     if not sacct_available and status_command in ("sacct", "squeue+sacct"):
         logger.warning(

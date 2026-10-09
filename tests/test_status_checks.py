@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shlex
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,8 +7,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from snakemake_executor_plugin_slurm import Executor
+from snakemake_executor_plugin_slurm import Executor, _get_status_command_default
 from snakemake_executor_plugin_slurm.job_status_query import (
+    get_status_check_intervals,
     query_job_status_sacct,
     query_job_status_squeue,
 )
@@ -128,6 +130,65 @@ def test_status_interval_is_capped_by_max_setting(
     assert executor.next_seconds_between_status_checks == expected_next_seconds
 
 
+@pytest.mark.parametrize(
+    "status_command, init_seconds, max_seconds, expected_intervals",
+    [
+        ("squeue+sacct", None, None, (20, 20)),
+        ("sacct", None, None, (40, 180)),
+        ("squeue", None, None, (40, 180)),
+        # a default maximum is never smaller than a set initial time
+        ("squeue+sacct", 10, None, (10, 20)),
+        ("squeue+sacct", 60, None, (60, 60)),
+        ("sacct", 300, None, (300, 300)),
+        # a default initial time never exceeds a set maximum
+        ("squeue+sacct", None, 10, (10, 10)),
+        ("sacct", None, 30, (30, 30)),
+        ("sacct", 10, 60, (10, 60)),
+    ],
+)
+def test_status_check_interval_defaults_depend_on_status_command(
+    status_command, init_seconds, max_seconds, expected_intervals
+):
+    settings = SimpleNamespace(
+        init_seconds_before_status_checks=init_seconds,
+        max_seconds_between_status_checks=max_seconds,
+    )
+
+    assert get_status_check_intervals(settings, status_command) == expected_intervals
+
+
+def test_squeue_sacct_checks_status_every_20_seconds_by_default(monkeypatch):
+    executor = _make_executor("squeue+sacct", None, None, 20)
+    _mock_status_queries(monkeypatch, {"101": "RUNNING"}, {})
+    job = _make_job("101")
+
+    remaining = _check_active_jobs(executor, [job])
+
+    assert remaining == [job]
+    assert executor.next_seconds_between_status_checks == 20
+
+
+@pytest.mark.parametrize(
+    "available_tools, expected_default",
+    [
+        ({"squeue", "sacct"}, "squeue+sacct"),
+        ({"sacct"}, "sacct"),
+        ({"squeue"}, "squeue"),
+    ],
+)
+def test_status_command_default(monkeypatch, available_tools, expected_default):
+    monkeypatch.setattr(
+        "snakemake_executor_plugin_slurm.shutil.which",
+        lambda tool: f"/usr/bin/{tool}",
+    )
+    monkeypatch.setattr(
+        "snakemake_executor_plugin_slurm.is_query_tool_available",
+        lambda tool: tool in available_tools,
+    )
+
+    assert _get_status_command_default() == expected_default
+
+
 def test_squeue_sacct_job_finished_in_squeue(monkeypatch):
     executor = _make_executor("squeue+sacct", 40, 180, 40)
     commands = _mock_status_queries(
@@ -229,7 +290,7 @@ def test_squeue_sacct_failed_job_in_squeue_gets_reason_from_sacct(monkeypatch):
     )
 
 
-def test_squeue_command_lists_array_tasks_separately():
+def test_squeue_command_lists_array_tasks_of_current_user():
     command = query_job_status_squeue("run-uuid")
 
     assert shlex.split(command) == [
@@ -238,6 +299,8 @@ def test_squeue_command_lists_array_tasks_separately():
         "--states=all",
         "--array",
         "--noheader",
+        "--user",
+        str(os.getuid()),
         "--name",
         "run-uuid",
     ]
