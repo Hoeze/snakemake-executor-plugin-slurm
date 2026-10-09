@@ -106,3 +106,9 @@ def test_init_seconds_above_default_max_is_valid():
     settings = ExecutorSettings(init_seconds_before_status_checks=300)
 
     assert settings.max_seconds_between_status_checks is None
+
+
+def test_squeue_sacct_status_command_is_valid():
+    settings = ExecutorSettings(status_command="squeue+sacct")
+
+    assert settings.status_command == "squeue+sacct"

@@ -104,14 +104,19 @@ def _get_status_command_help():
     # in 3rd party CI tests)
     if default_cmd is None:
         return (
-            "Command to query job status. Options: 'sacct', 'squeue'. "
+            "Command to query job status. Options: 'sacct', 'squeue', "
+            "'squeue+sacct'. "
             "SLURM not detected on this system, so no status command can be used."
         )
 
     sacct_available = is_query_tool_available("sacct")
     squeue_recommended = should_recommend_squeue_status_command()
 
-    base_help = "Command to query job status. Options: 'sacct', 'squeue'. "
+    base_help = (
+        "Command to query job status. Options: 'sacct', 'squeue', "
+        "'squeue+sacct'. 'squeue+sacct' queries squeue first and uses sacct "
+        "only for active jobs that squeue does not report. "
+    )
 
     if default_cmd == "sacct":
         if sacct_available and not squeue_recommended:
@@ -143,6 +148,11 @@ def _get_status_command_help():
         f"{base_help}Default: '{default_cmd}' ({info}). "
         f"Set explicitly to override auto-detection."
     )
+
+
+# Above this number of job IDs, a sacct query restricted with `--jobs` might
+# exceed the maximum length of a command line argument.
+_MAX_SACCT_JOB_IDS = 1000
 
 
 def _status_lookup_ids(external_jobid: str) -> List[str]:
@@ -1343,7 +1353,10 @@ class Executor(RemoteExecutor):
                     f"(MinJobAge={min_job_age}; threshold={dynamic_check_threshold}s)."
                 )
                 status_command_name = "sacct"
-        if status_command_name == "sacct" and not is_query_tool_available("sacct"):
+        if status_command_name in (
+            "sacct",
+            "squeue+sacct",
+        ) and not is_query_tool_available("sacct"):
             self.logger.info("'sacct' unavailable, using 'squeue' for status queries.")
             status_command_name = "squeue"
         if status_command_name == "sacct":
@@ -1467,6 +1480,13 @@ class Executor(RemoteExecutor):
                 "that slurmdbd job accounting is properly set up.\n"
             )
 
+        if status_command_name == "squeue+sacct" and status_of_jobs is not None:
+            sacct_status_of_jobs = await self._query_jobs_missing_in_squeue(
+                active_jobs_ids, status_of_jobs
+            )
+            # squeue reports the current state, so it takes precedence
+            status_of_jobs = {**sacct_status_of_jobs, **status_of_jobs}
+
         if status_of_jobs is not None:
             any_finished = False
             self.logger.debug(
@@ -1567,7 +1587,7 @@ We leave it to SLURM to resume your job(s)""")
                         active_jobs_seen_by_sacct.discard(j.external_jobid)
                 elif status in fail_stati:
                     # we can only check for the fail status, if `sacct` is available
-                    if status_command_name != "sacct":
+                    if status_command_name == "squeue":
                         msg = (
                             f"SLURM-job '{j.external_jobid}' failed, "
                             f"SLURM status is: '{status}'. "
@@ -1626,6 +1646,39 @@ We leave it to SLURM to resume your job(s)""")
                 )
             else:
                 self.next_seconds_between_status_checks = initial_interval
+
+    async def _query_jobs_missing_in_squeue(self, active_jobs_ids, status_of_jobs):
+        """Query sacct for the active jobs that squeue did not report.
+
+        squeue reports a job only until MinJobAge seconds after it ended.
+        Returns a dict mapping job IDs to status strings. The dict is empty
+        if squeue reported all active jobs or if the sacct query failed.
+        """
+        missing_lookup_ids = set()
+        for external_jobid in active_jobs_ids:
+            lookup_ids = _status_lookup_ids(external_jobid)
+            if not any(candidate in status_of_jobs for candidate in lookup_ids):
+                missing_lookup_ids.update(lookup_ids)
+        if not missing_lookup_ids:
+            return {}
+        self.logger.debug(
+            f"Querying sacct for {len(missing_lookup_ids)} job IDs "
+            "that squeue did not report."
+        )
+        if len(missing_lookup_ids) > _MAX_SACCT_JOB_IDS:
+            status_command = query_job_status_sacct(self.run_uuid)
+        else:
+            status_command = query_job_status_sacct(
+                self.run_uuid, sorted(missing_lookup_ids)
+            )
+        async with self.status_rate_limiter:
+            sacct_status_of_jobs, _ = await query_job_status(
+                status_command, self.logger
+            )
+        if sacct_status_of_jobs is None:
+            self.logger.debug("sacct query for jobs missing in squeue failed.")
+            return {}
+        return sacct_status_of_jobs
 
     def cancel_jobs(self, active_jobs: List[SubmittedJobInfo]):
         """Cancel all active jobs.

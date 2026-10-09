@@ -150,7 +150,7 @@ def validate_status_command_settings(settings, logger):
         40,
     )
     dynamic_check_threshold = 3 * initial_interval
-    if not sacct_available and status_command == "sacct":
+    if not sacct_available and status_command in ("sacct", "squeue+sacct"):
         logger.warning(
             "The 'sacct' command is not available. Falling back to 'squeue'."
         )
@@ -179,9 +179,10 @@ def validate_executor_settings(settings, logger=None):
         )
     # status_command: only allow known values
     if settings.status_command is not None:
-        if settings.status_command not in {"sacct", "squeue"}:
+        if settings.status_command not in {"sacct", "squeue", "squeue+sacct"}:
             raise WorkflowError(
-                "Invalid status command. Allowed values are 'sacct' or 'squeue'."
+                "Invalid status command. Allowed values are 'sacct', 'squeue' "
+                "or 'squeue+sacct'."
             )
     # status_attempts
     if settings.status_attempts is not None:

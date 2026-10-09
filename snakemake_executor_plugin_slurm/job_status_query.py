@@ -105,12 +105,13 @@ def should_recommend_squeue_status_command(min_threshold_seconds=120):
     return False
 
 
-def query_job_status_sacct(runid) -> list:
+def query_job_status_sacct(runid, job_ids=None) -> list:
     """
     Query job status using sacct command
 
     Args:
         runid: workflow run ID
+        job_ids: optional list of job IDs to restrict the query to
 
     Returns:
         Dictionary mapping job ID to JobStatus object
@@ -129,6 +130,8 @@ def query_job_status_sacct(runid) -> list:
                         --noheader --format=JobIdRaw,State \
                         --starttime {sacct_starttime} \
                         --endtime now --name {runid}"""
+    if job_ids:
+        query_command = f"{query_command} --jobs {','.join(job_ids)}"
 
     # for better redability in verbose output
     query_command = shlex.join(shlex.split(query_command))
@@ -150,9 +153,11 @@ def query_job_status_squeue(runid) -> list:
     # Note: The format string contains a pipe '|' which must be quoted to
     # prevent shell interpretation when passing to subprocess with shell=True
     format_arg = shlex.quote("%i|%T")
+    # --array: report each pending array task on its own line
     query_command = f"""squeue
                        --format={format_arg}
                        --states=all
+                       --array
                        --noheader
                        --name {runid}"""
     # for better redability in verbose output

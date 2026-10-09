@@ -1,4 +1,5 @@
 import asyncio
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -6,6 +7,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from snakemake_executor_plugin_slurm import Executor
+from snakemake_executor_plugin_slurm.job_status_query import (
+    query_job_status_sacct,
+    query_job_status_squeue,
+)
 
 
 class _NoopAsyncContext:
@@ -72,6 +77,7 @@ def _mock_status_queries(monkeypatch, squeue_output, sacct_output):
         "snakemake_executor_plugin_slurm.query_job_status_sacct",
         _mock_sacct_command,
     )
+    # A MinJobAge below the squeue threshold must not matter for squeue+sacct.
     monkeypatch.setattr(
         "snakemake_executor_plugin_slurm.get_min_job_age",
         lambda: 60,
@@ -120,3 +126,124 @@ def test_status_interval_is_capped_by_max_setting(
 
     assert remaining == [job]
     assert executor.next_seconds_between_status_checks == expected_next_seconds
+
+
+def test_squeue_sacct_job_finished_in_squeue(monkeypatch):
+    executor = _make_executor("squeue+sacct", 40, 180, 40)
+    commands = _mock_status_queries(
+        monkeypatch, {"101": "COMPLETED", "102": "RUNNING"}, {}
+    )
+    finished_job = _make_job("101")
+    running_job = _make_job("102")
+
+    remaining = _check_active_jobs(executor, [finished_job, running_job])
+
+    assert remaining == [running_job]
+    assert commands == ["squeue"]
+    executor.report_job_success.assert_called_once_with(finished_job)
+    executor.report_job_error.assert_not_called()
+    assert executor.next_seconds_between_status_checks == 40
+
+
+def test_squeue_sacct_job_missing_in_squeue_resolved_by_sacct(monkeypatch):
+    executor = _make_executor("squeue+sacct", 40, 180, 40)
+    commands = _mock_status_queries(
+        monkeypatch, {"101": "RUNNING"}, {"102": "COMPLETED"}
+    )
+    running_job = _make_job("101")
+    aged_out_job = _make_job("102")
+
+    remaining = _check_active_jobs(executor, [running_job, aged_out_job])
+
+    assert remaining == [running_job]
+    assert commands == ["squeue", "sacct --jobs 102"]
+    executor.report_job_success.assert_called_once_with(aged_out_job)
+    executor.report_job_error.assert_not_called()
+
+
+def test_squeue_sacct_job_missing_in_squeue_and_sacct(monkeypatch):
+    executor = _make_executor("squeue+sacct", 40, 180, 40)
+    commands = _mock_status_queries(monkeypatch, {}, {})
+    job = _make_job("103")
+
+    remaining = _check_active_jobs(executor, [job])
+
+    assert remaining == [job]
+    assert commands == ["squeue", "sacct --jobs 103"]
+    executor.report_job_success.assert_not_called()
+    executor.report_job_error.assert_not_called()
+    assert executor.next_seconds_between_status_checks == 50
+
+
+def test_squeue_sacct_array_task_missing_in_squeue_uses_parent_status(monkeypatch):
+    executor = _make_executor("squeue+sacct", 40, 180, 40)
+    commands = _mock_status_queries(monkeypatch, {}, {"200": "COMPLETED"})
+    job = _make_job("200_5")
+
+    remaining = _check_active_jobs(executor, [job])
+
+    assert remaining == []
+    assert commands == ["squeue", "sacct --jobs 200,200_5"]
+    executor.report_job_success.assert_called_once_with(job)
+
+
+def test_squeue_sacct_many_missing_jobs_use_run_wide_sacct(monkeypatch):
+    executor = _make_executor("squeue+sacct", 40, 180, 40)
+    commands = _mock_status_queries(monkeypatch, {}, {"101": "RUNNING"})
+    monkeypatch.setattr("snakemake_executor_plugin_slurm._MAX_SACCT_JOB_IDS", 1)
+    running_job = _make_job("101")
+    unknown_job = _make_job("102")
+
+    remaining = _check_active_jobs(executor, [running_job, unknown_job])
+
+    assert remaining == [running_job, unknown_job]
+    assert commands == ["squeue", "sacct"]
+
+
+def test_squeue_sacct_failed_job_in_squeue_gets_reason_from_sacct(monkeypatch):
+    executor = _make_executor("squeue+sacct", 40, 180, 40)
+    _mock_status_queries(monkeypatch, {"101": "FAILED"}, {})
+    reason_commands = []
+
+    def _mock_check_output(command, **kwargs):
+        reason_commands.append(command)
+        if command.startswith("sacct -j 101.0 "):
+            return "OutOfMemory\n"
+        return ""
+
+    monkeypatch.setattr(
+        "snakemake_executor_plugin_slurm.subprocess.check_output",
+        _mock_check_output,
+    )
+    job = _make_job("101")
+
+    remaining = _check_active_jobs(executor, [job])
+
+    assert remaining == []
+    assert len(reason_commands) == 10
+    executor.report_job_error.assert_called_once_with(
+        job,
+        msg="SLURM-job '101' failed, SLURM status is: 'FAILED'. "
+        "Reason: Step 0: OutOfMemory.",
+        aux_logs=["101.log"],
+    )
+
+
+def test_squeue_command_lists_array_tasks_separately():
+    command = query_job_status_squeue("run-uuid")
+
+    assert shlex.split(command) == [
+        "squeue",
+        "--format=%i|%T",
+        "--states=all",
+        "--array",
+        "--noheader",
+        "--name",
+        "run-uuid",
+    ]
+
+
+def test_sacct_command_restricted_to_job_ids():
+    command = query_job_status_sacct("run-uuid", ["101", "102_3"])
+
+    assert shlex.split(command)[-4:] == ["--name", "run-uuid", "--jobs", "101,102_3"]

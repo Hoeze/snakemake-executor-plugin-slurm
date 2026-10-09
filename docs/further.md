@@ -317,6 +317,22 @@ You can change this maximum with the `--slurm-max-seconds-between-status-checks=
 It must not be smaller than `--slurm-init-seconds-before-status-checks`.
 If both values are equal, the plugin checks the job status at a fixed interval.
 
+##### Status Command
+
+With `--slurm-status-command`, you select how the plugin queries the job status:
+
+* `sacct` (the default, if `sacct` is available) queries the SLURM accounting database (`slurmdbd`) for all jobs of the workflow run.
+* `squeue` queries the SLURM controller (`slurmctld`) for all jobs of the workflow run.
+  The controller only reports a job until `MinJobAge` seconds after it ended.
+  The plugin falls back to `sacct` if `sacct` is available and `MinJobAge` is unknown or shorter than three times the initial wait time.
+* `squeue+sacct` runs one `squeue` query per round for all jobs of the workflow run.
+  It runs one `sacct` query for the active jobs that `squeue` does not report.
+  For example, `squeue` no longer reports jobs that ended more than `MinJobAge` seconds ago.
+  This saves most queries to the accounting database and does not depend on `MinJobAge`.
+  Failed jobs are still reported with the reason from `sacct`.
+  Jobs submitted to other clusters with the `clusters` resource are always queried with `sacct`.
+  Without `sacct`, the plugin falls back to `squeue`.
+
 ##### Retry failed Jobs
 
 When running workflows, jobs will occasionally fail.
