@@ -199,6 +199,24 @@ def validate_executor_settings(settings, logger=None):
             raise WorkflowError(
                 "init-seconds-before-status-checks must be a positive integer."
             )
+    # max_seconds_between_status_checks
+    if settings.max_seconds_between_status_checks is not None:
+        if (
+            not isinstance(settings.max_seconds_between_status_checks, int)
+            or settings.max_seconds_between_status_checks < 1
+        ):
+            raise WorkflowError(
+                "max-seconds-between-status-checks must be a positive integer."
+            )
+        if (
+            settings.init_seconds_before_status_checks is not None
+            and settings.max_seconds_between_status_checks
+            < settings.init_seconds_before_status_checks
+        ):
+            raise WorkflowError(
+                "max-seconds-between-status-checks must not be smaller than "
+                "init-seconds-before-status-checks."
+            )
     # efficiency_threshold
     if settings.efficiency_threshold is not None:
         try:

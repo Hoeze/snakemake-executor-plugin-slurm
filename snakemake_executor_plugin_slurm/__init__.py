@@ -251,6 +251,18 @@ class ExecutorSettings(ExecutorSettingsBase):
         },
     )
 
+    max_seconds_between_status_checks: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Defines the maximum time in seconds between two status "
+            "checks. Without finished jobs, the time between status checks "
+            "grows by 10 seconds per check up to this value. Must not be "
+            "smaller than the initial time before status checks. If both are "
+            "equal, the status is checked at a fixed interval. "
+            "If not set, the maximum is 180 seconds.",
+        },
+    )
+
     requeue: bool = field(
         default=False,
         metadata={
@@ -370,7 +382,8 @@ class ExecutorSettings(ExecutorSettingsBase):
             "all active jobs. If the status query fails, the next attempt "
             "will be performed after the next status check interval. "
             "The default is 5 status attempts before giving up. The maximum "
-            "time between status checks is 180 seconds.",
+            "time between status checks is set with "
+            "--slurm-max-seconds-between-status-checks.",
             "env_var": False,
             "required": False,
         },
@@ -1283,9 +1296,16 @@ class Executor(RemoteExecutor):
         # of `slurmdbd`) and this in turn can rely on default config,
         # see: https://stackoverflow.com/a/46667605
         # This config defaults to `MinJobAge=300`, which implies that jobs will
-        # be removed from `slurmctld` within 6 minutes of finishing. So we're
-        # conservative here, with half that time.
-        max_sleep_time = 180
+        # be removed from `slurmctld` within 6 minutes of finishing. So the
+        # default is conservative, with half that time.
+        max_sleep_time = (
+            getattr(
+                self.workflow.executor_settings,
+                "max_seconds_between_status_checks",
+                None,
+            )
+            or 180
+        )
 
         sacct_query_durations = []
 
